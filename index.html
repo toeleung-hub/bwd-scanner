@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Bella 掃描</title>
+<style>
+  :root { --ink: #1d2330; --muted: #6b7280; --line: #e3e6eb; --accent: #2f6fdd; --good: #1f8a4c; --bad: #c0392b; --bg: #f5f6f8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: var(--ink); color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+  header b { font-size: 16px; }
+  main { padding: 12px 16px 120px; max-width: 560px; margin: 0 auto; }
+  .panel { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+  #reader { width: 100%; border-radius: 10px; overflow: hidden; background: #000; min-height: 220px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .modes { display: flex; flex-wrap: wrap; gap: 6px; }
+  .modes button { border: 1px solid var(--line); background: #fff; border-radius: 99px; padding: 6px 12px; font: inherit; font-size: 14px; }
+  .modes button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .btn { font: inherit; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--line); background: #fff; }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn:disabled { opacity: .5; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; justify-content: space-between; align-items: center; padding: 8px 4px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  li code { font-size: 16px; }
+  li small { color: var(--muted); margin-left: 6px; }
+  li button { border: 0; background: none; color: var(--bad); font-size: 18px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .bad { color: var(--bad); }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid var(--line); padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
+  .bar .row { max-width: 560px; margin: 0 auto; }
+  .flash { animation: fl .5s; } @keyframes fl { from { background: #d9f2e3; } to { background: #fff; } }
+  input[type=text] { font: inherit; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; flex: 1; min-width: 0; }
+</style>
+</head>
+<body>
+<header><b>📷 Bella 掃描</b><span class="muted" style="color:#9aa4b8" id="appState"></span></header>
+<main>
+  <div class="panel" id="setup" hidden>
+    <b>未連接 app</b>
+    <p class="muted">請從 Bella Working Desk →「掃描」頁 →「📷 相機掃吊牌條碼」打開本頁，會自動連接。</p>
+  </div>
+
+  <div class="panel">
+    <div class="modes" id="modes"></div>
+  </div>
+
+  <div class="panel">
+    <div id="reader"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" id="camBtn">開啟相機</button>
+      <label class="row muted" style="gap:4px"><input type="checkbox" id="auto"> 掃一件即送出</label>
+    </div>
+    <div class="muted" id="camMsg" style="margin-top:6px">支援吊牌條碼（UPC／EAN）及 QR 貼紙。對準條碼，保持 15–20 cm。</div>
+    <div class="row" style="margin-top:10px"><input type="text" id="manual" inputmode="numeric" placeholder="或手動輸入號碼"><button class="btn" id="addManual">加入</button></div>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between"><b>已掃 <span id="cnt">0</span> 個</b><button class="btn" id="clear" style="padding:6px 12px">清除</button></div>
+    <ul id="list"></ul>
+  </div>
+</main>
+<div class="bar"><div class="row"><button class="btn primary" id="send" style="flex:1" disabled>送出到 app</button></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script>
+(function () {
+  const $ = s => document.querySelector(s);
+  const MODES = [['auto', '自動'], ['receiveUS', '美國收貨'], ['pack', '裝箱'], ['receiveTW', '台灣到貨'], ['lookup', '只查詢']];
+  const params = new URLSearchParams(location.search);
+  const ls = { get: (k, d) => { try { const v = localStorage.getItem('bwds-' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+               set: (k, v) => { try { localStorage.setItem('bwds-' + k, JSON.stringify(v)); } catch (e) {} } };
+
+  // Only ever send codes back to a Google Apps Script web app (no open redirect).
+  const okApp = u => /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/(exec|dev)$/.test(u || '') || /^http:\/\/localhost:\d+\/$/.test(u || '');
+  let app = params.get('app');
+  if (okApp(app)) ls.set('app', app); else app = ls.get('app', '');
+  if (!okApp(app)) { app = ''; $('#setup').hidden = false; }
+  $('#appState').textContent = app ? '已連接 app' : '';
+
+  let mode = MODES.some(m => m[0] === params.get('mode')) ? params.get('mode') : ls.get('mode', 'auto');
+  const renderModes = () => {
+    $('#modes').innerHTML = MODES.map(([v, l]) => `<button data-v="${v}" class="${v === mode ? 'on' : ''}">${l}</button>`).join('');
+  };
+  $('#modes').onclick = e => { const b = e.target.closest('button'); if (!b) return; mode = b.dataset.v; ls.set('mode', mode); renderModes(); };
+  renderModes();
+
+  let codes = ls.get('codes', []);
+  const auto = $('#auto'); auto.checked = ls.get('auto', false); auto.onchange = () => ls.set('auto', auto.checked);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function render() {
+    $('#cnt').textContent = codes.length;
+    $('#list').innerHTML = codes.map((c, i) => `<li><span><code>${esc(c.code)}</code><small>${esc(c.fmt || '')}</small></span><button data-i="${i}" aria-label="刪除">✕</button></li>`).join('')
+      || '<li class="muted">還沒有掃描</li>';
+    $('#send').disabled = !codes.length || !app;
+    $('#send').textContent = codes.length ? `送出 ${codes.length} 個到 app` : '送出到 app';
+    ls.set('codes', codes);
+  }
+  $('#list').onclick = e => { const b = e.target.closest('button[data-i]'); if (b) { codes.splice(+b.dataset.i, 1); render(); } };
+  $('#clear').onclick = () => { if (!codes.length || confirm('清除全部？')) { codes = []; render(); } };
+
+  // QR stickers carry "<app>?scan=ID" — keep just the ID
+  const clean = raw => { const s = String(raw || '').trim(); const m = /[?&]scan=([^&#]+)/.exec(s); return m ? decodeURIComponent(m[1]) : s; };
+  let last = '', lastT = 0;
+  function add(raw, fmt) {
+    const code = clean(raw);
+    if (!code || code.length > 80) return;
+    const now = Date.now();
+    if (code === last && now - lastT < 2500) return;          // same code still in front of the camera
+    last = code; lastT = now;
+    codes.push({ code, fmt: fmt || '' });
+    render();
+    try { navigator.vibrate && navigator.vibrate(60); } catch (e) {}
+    beep();
+    const li = $('#list li:last-child'); if (li) li.classList.add('flash');
+    if (auto.checked) send();
+  }
+  let ac;
+  function beep() {
+    try { ac = ac || new (window.AudioContext || window.webkitAudioContext)(); const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = 1400; g.gain.value = 0.08; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + 0.08); } catch (e) {}
+  }
+  $('#addManual').onclick = () => { const v = $('#manual').value.trim(); if (v) { last = ''; add(v, '手動'); $('#manual').value = ''; } };
+  $('#manual').onkeydown = e => { if (e.key === 'Enter') $('#addManual').click(); };
+
+  function send() {
+    if (!app || !codes.length) return;
+    const url = app + '?scan=' + encodeURIComponent(codes.map(c => c.code).join(',')) + '&mode=' + encodeURIComponent(mode);
+    codes = []; ls.set('codes', []);
+    location.href = url;
+  }
+  $('#send').onclick = send;
+
+  // camera
+  let scanner = null;
+  const F = window.Html5QrcodeSupportedFormats || {};
+  const formats = ['EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_128', 'CODE_39', 'QR_CODE'].map(k => F[k]).filter(v => v !== undefined);
+  async function startCam() {
+    $('#camMsg').textContent = '開啟相機中…';
+    try {
+      scanner = new Html5Qrcode('reader', { formatsToSupport: formats, experimentalFeatures: { useBarCodeDetectorIfSupported: true }, verbose: false });
+      await scanner.start({ facingMode: 'environment' },
+        { fps: 12, qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h, w) * 0.45) }), aspectRatio: 1.333 },
+        (text, res) => add(text, res && res.result && res.result.format ? res.result.format.formatName : ''), () => {});
+      $('#camBtn').textContent = '關閉相機';
+      $('#camMsg').textContent = '對準條碼（橫放），聽到「嗶」即已加入。';
+    } catch (e) {
+      scanner = null;
+      $('#camMsg').innerHTML = '<span class="bad">無法開啟相機：' + esc(e && (e.message || e.name) || e) + '</span><br>請在瀏覽器設定允許本網站使用相機，然後重新整理。';
+    }
+  }
+  async function stopCam() { if (scanner) { try { await scanner.stop(); } catch (e) {} scanner = null; } $('#camBtn').textContent = '開啟相機'; }
+  $('#camBtn').onclick = () => scanner ? stopCam() : startCam();
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopCam(); });
+
+  render();
+  if (app && typeof Html5Qrcode === 'function') startCam();
+  else if (typeof Html5Qrcode !== 'function') $('#camMsg').innerHTML = '<span class="bad">掃描元件載入失敗，請檢查網絡後重新整理。</span>';
+})();
+</script>
+</body>
+</html>
